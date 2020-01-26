@@ -1,0 +1,33 @@
+name:                hkd-default
+version:             1.0.0.0
+synopsis:            Apply default value for optional field of HKD
+description:         Please see http://hackage.haskell.org/package/hkd-default
+github:              versioncloud/hkd-default
+category:            HKD, Default, JSON, Library
+license:             BSD3
+author:              "Jorah Gao"
+maintainer:          "jorah@version.cloud"
+copyright:           "Copyright (c) 2020 Version Cloud"
+
+extra-source-files:
+- README.md
+- ChangeLog.md
+
+dependencies:
+- base >= 4.7 && < 5
+
+library:
+  source-dirs: src
+
+tests:
+  hkd-default-test:
+    main:                Main.hs
+    source-dirs:         test
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    - -O0
+    dependencies:
+    - hkd-default
+    - aeson
