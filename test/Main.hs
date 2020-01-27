@@ -38,8 +38,17 @@ main = do
         iput2 = Config (Just $ Database Nothing Nothing)
         iput3 = Config (Just $ Database (Just "192.168.1.2") Nothing)
         oput = Config (Database "192.168.1.2" 3306)
-        applyDefs = map (applyDef def)
-    in oput == applyDef def iput3 && all (== def) (applyDefs [iput1, iput2])
+        apply = map (applyDef def)
+    in oput == applyDef def iput3 && all (== def) (apply [iput1, iput2])
+
+  it "multiple data constructors" $
+    let def = Container (Square 10.0) 10
+        iput1 = Container Nothing Nothing
+        iput2 = Container (Just $ Square Nothing) Nothing
+        iput3 = Container (Just $ Circle Nothing) Nothing
+        oput = Container (Circle 1.0) 10
+        apply = map (applyDef def)
+    in all (== def) (apply [iput1, iput2]) && oput == applyDef def iput3
 
   putStrLn "\n>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>"
 
@@ -97,6 +106,23 @@ data Config f = Config { database :: HKD f (Database f) } deriving Generic
 deriving instance Eq (Config Identity)
 
 instance Default Config
+
+
+data Shape f = Square (HKD f Double) | Circle (HKD f Double) deriving Generic
+
+deriving instance Eq (Shape Identity)
+
+instance Default Shape where
+  defs = [("Square", Square 1.0), ("Circle", Circle 1.0)]
+
+
+data Container f = Container { base   :: HKD f (Shape f)
+                             , height :: HKD f Double
+                             } deriving Generic
+
+deriving instance Eq (Container Identity)
+
+instance Default Container
 
 
 it :: String -> Bool -> IO ()

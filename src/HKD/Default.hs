@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP                   #-}
 {-# LANGUAGE DefaultSignatures     #-}
 {-# LANGUAGE DeriveGeneric         #-}
 {-# LANGUAGE FlexibleContexts      #-}
@@ -86,7 +87,7 @@ instance FromJSON (ConfigH Maybe)
 type Config = Config Identity
 
 instance FromJSON Config where
-  parseJSON v = applyDef def <$> parseJSON v
+  parseJSON v = applyDef def \<$\> parseJSON v
     where
       def = Config undefined 3306 ...
 
@@ -110,7 +111,6 @@ data Triple f = Triple String (f Int) (f Double) deriving Generic
 instance Default Triple
 deriving instance Show (Triple Identity)
 :}
-...
 >>> let def = Triple "hello" (Identity 123) pi :: Triple Identity
 >>> applyDef def $ Triple "world" (Just 456) Nothing
 Triple "world" (Identity 456) (Identity 3.141592653589793)
@@ -145,6 +145,40 @@ instance FromJSON (Person Identity) where
 Just (Person {name = Name {first = Identity "Jorah", last_ = Identity "Gao"}, age = Identity 28})
 >>> decode "{}" :: Maybe (Person Identity)
 Nothing
+
+>>> :set -XDeriveGeneric
+>>> :set -XFlexibleInstances
+>>> :set -XFlexibleContexts
+>>> :set -XStandaloneDeriving
+>>> :set -XTypeFamilies
+>>> import           Data.Functor.Identity
+>>> import           GHC.Generics
+>>> import           HKD.Default
+>>> :{
+type family HKD f a where
+  HKD Identity a = a
+  HKD f        a = f a
+data Shape f = Square (HKD f Double) | Circle (HKD f Double) deriving Generic
+deriving instance Show (Shape Identity)
+instance Default Shape where
+  defs = [("Square", Square 1.0), ("Circle", Circle 1.0)]
+data Container f = Container { base   :: HKD f (Shape f)
+                             , height :: HKD f Double
+                             } deriving Generic
+deriving instance Show (Container Identity)
+instance Default Container
+:}
+>>> let def = Container (Square 10.0) 10.0
+>>> applyDef def $ Container Nothing Nothing
+Container {base = Square 10.0, height = 10.0}
+>>> applyDef def $ Container (Just $ Square Nothing) Nothing
+Container {base = Square 10.0, height = 10.0}
+>>> applyDef def $ Container (Just $ Circle Nothing) Nothing
+Container {base = Circle 1.0, height = 10.0}
+>>> applyDefs $ Square Nothing
+Square 1.0
+>>> applyDefs $ Circle Nothing
+Circle 1.0
 -}
 module HKD.Default
   ( Default(..)
@@ -155,71 +189,143 @@ import           Data.Functor.Identity
 import           Data.Maybe
 import           GHC.Generics
 
+data Mismatch = Mismatch
 
 -- | In most cases, use the default implementation for 'Generic' instance.
 class Default (t :: (* -> *) -> *) where
+  {-| Only used for datatypes with multiple data constructors,
+  default implementation is @[]@.
+
+  @since 1.1.0
+  -}
+  defs :: [(String, t Identity)]
+  defs = []
+
+  {-| You should either provide 'lookupDef' or 'defs', default implementation
+  is to look up by the given constructor name from 'defs'.
+
+  @since 1.1.0
+  -}
+  lookupDef ::  String -> Maybe (t Identity)
+  lookupDef = flip lookup defs
+
   applyDef :: t Identity -> t Maybe -> t Identity
 
+  {- | Apply the given default value, and fallback to 'applyDefs' if the
+  default value's constructor does not match.
+  -}
   default applyDef :: ( Generic (t Identity)
                       , Generic (t Maybe)
+                      , GConsName (Rep (t Maybe))
                       , GDefault (Rep (t Identity)) (Rep (t Maybe))
                       )
                    => t Identity -> t Maybe -> t Identity
-  applyDef i m = to $ gapplyDef (from i) (from m)
+  applyDef i m | Right r <- gapplyDef (from i) (from m) = to r
+  applyDef _ m = applyDefs m -- fallback to apply appropriate default value
+
+
+  applyDefs :: t Maybe -> t Identity
+
+  {- | Look up the appropriate default value from defs and try to apply.
+
+  The default implementation will raise "Can't find default value" error when
+  the result of looking up from 'defs' is 'Nothing'.
+
+  The default implementation will raise "Mismatch Constructor" error when the
+  default value's constructor does not match.
+
+  @since 1.1.0
+  -}
+  default applyDefs :: ( Generic (t Identity)
+                       , Generic (t Maybe)
+                       , GConsName (Rep (t Maybe))
+                       , GDefault (Rep (t Identity)) (Rep (t Maybe))
+                       )
+                    => t Maybe -> t Identity
+  applyDefs m = applyOrThrow (lookupDef (gconsName (from m))) m
+    where
+      -- suppress compiler error
+      -- NB: ‘Rep’ is a type function, and may not be injective
+      applyOrThrow :: ( Generic (t Identity)
+                      , Generic (t Maybe)
+                      , GDefault (Rep (t Identity)) (Rep (t Maybe))
+                      )
+                   => (Maybe (t Identity)) -> t Maybe -> t Identity
+      applyOrThrow (Just i) m | Right r <- gapplyDef (from i) (from m) = to r
+      applyOrThrow Nothing _  = error "HKD.Default: Can't find default value"
+      applyOrThrow _ _        = error "HKD.Default: Mismatch Constructor"
 
 
 class GDefault f g where
-  gapplyDef :: f (t Identity) -> g (t Maybe) -> f (t Identity)
+  gapplyDef :: f (t Identity) -> g (t Maybe) -> Either Mismatch (f (t Identity))
 
 -- Data type
 instance GDefault f g => GDefault (D1 c f) (D1 c g) where
-  gapplyDef (M1 p) (M1 k) = M1 $ gapplyDef p k
+  gapplyDef (M1 p) (M1 k) = M1 <$> gapplyDef p k
 
 -- Choice between data constructors
 instance ( GDefault f g
          , GDefault f' g'
          ) => GDefault (f :+: f') (g :+: g') where
-  gapplyDef (L1 p) (L1 k) = L1 $ gapplyDef p k
-  gapplyDef (R1 p) (R1 k) = R1 $ gapplyDef p k
+  gapplyDef (L1 p) (L1 k) = L1 <$> gapplyDef p k
+  gapplyDef (R1 p) (R1 k) = R1 <$> gapplyDef p k
+  gapplyDef _ _           = Left Mismatch
 
 -- Data constructor
 instance ( Constructor c
          , GDefault f g
          ) => GDefault (C1 c f) (C1 c g) where
-  gapplyDef (M1 p) (M1 k) = M1 $ gapplyDef p k
+  gapplyDef (M1 p) (M1 k) = M1 <$> gapplyDef p k
 
 -- Enum type (nullary data constructor)
 instance Constructor c => GDefault (C1 c U1) (C1 c U1) where
-  gapplyDef (M1 p) (M1 k) = M1 p
+  gapplyDef (M1 p) (M1 k) = Right $ M1 p
 
 -- Apply record selectors
 instance ( GDefault f g
          , GDefault f' g'
          ) => GDefault (f :*: f') (g :*: g') where
-  gapplyDef (p :*: p') (k :*: k') = (gapplyDef p k) :*: (gapplyDef p' k')
+  gapplyDef (p :*: p') (k :*: k') = do
+    x <- gapplyDef p k
+    y <- gapplyDef p' k'
+    return $ x :*: y
 
 -- Selector
 instance (Selector c , GDefault f g) => GDefault (S1 c f) (S1 c g) where
-  gapplyDef (M1 p) (M1 k) = M1 $ gapplyDef p k
+  gapplyDef (M1 p) (M1 k) = M1 <$> gapplyDef p k
 
 -- Not nested required field
 instance GDefault (K1 i f) (K1 i f) where
-  gapplyDef (K1 p) (K1 k) = K1 k
+  gapplyDef (K1 p) (K1 k) = Right $ K1 k
 
 -- Not nested optional field (use type family)
 instance GDefault (K1 i f) (K1 i (Maybe f)) where
-  gapplyDef (K1 p) (K1 k) = K1 $ fromMaybe p k
+  gapplyDef (K1 p) (K1 k) = Right $ K1 $ fromMaybe p k
 
 -- Not nested optional field (not use type family)
 instance GDefault (K1 i (Identity f)) (K1 i (Maybe f)) where
-  gapplyDef (K1 p) (K1 Nothing)  = K1 p
-  gapplyDef (K1 p) (K1 (Just k)) = K1 $ Identity k
+  gapplyDef (K1 p) (K1 Nothing)  = Right $ K1 p
+  gapplyDef (K1 p) (K1 (Just k)) = Right $ K1 $ Identity k
 
 -- Nested required field
 instance Default t => GDefault (K1 i (t Identity)) (K1 i (t Maybe)) where
-  gapplyDef (K1 p) (K1 k) = K1 $ applyDef p k
+  gapplyDef (K1 p) (K1 k) = Right $ K1 $ applyDef p k
 
 -- Nested optional field
 instance Default t => GDefault (K1 i (t Identity)) (K1 i (Maybe (t Maybe))) where
-  gapplyDef (K1 p) (K1 Nothing)  = K1 p
-  gapplyDef (K1 p) (K1 (Just k)) = K1 $ applyDef p k
+  gapplyDef (K1 p) (K1 Nothing)  = Right $ K1 p
+  gapplyDef (K1 p) (K1 (Just k)) = Right $ K1 $ applyDef p k
+
+
+class GConsName f where
+  gconsName :: f p -> String
+
+instance GConsName f => GConsName (D1 c f) where
+  gconsName (M1 x) = gconsName x
+
+instance (GConsName f, GConsName g)=> GConsName (f :+: g) where
+  gconsName (L1 x) = gconsName x
+  gconsName (R1 x) = gconsName x
+
+instance Constructor c => GConsName (C1 c f) where
+  gconsName = conName
