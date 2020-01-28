@@ -1,3 +1,4 @@
 # Changelog for hkd-default
 
-## Unreleased changes
+## v1.1.0
+- Add support for types with multiple data constructors
